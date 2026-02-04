@@ -1,0 +1,273 @@
+#include <EEPROM.h>
+
+// Pines ATtiny85
+#define PIN_BUZZER     0  // D0 - Buzzer (activo)
+#define PIN_LED_VERDE  1  // D1 - LED Verde
+#define PIN_LED_ROJO   2  // D2 - LED Rojo
+#define PIN_START      3  // D3 - Pulsador START (activo bajo)
+#define PIN_FREC       4  // D4 - Pulsador Frecuencia (activo bajo)
+
+// Configuración de notas para el buzzer
+#define TONO_ROJO  1000  // Frecuencia en Hz para el buzzer
+#define DURACION_TONO 250 // ms de cada tono
+
+// Estados del sistema
+enum Estado {
+  REPOSO,
+  INTERMITENTE,
+  RESULTADO
+};
+
+// Variables globales
+volatile Estado estado = REPOSO;
+volatile uint8_t frecuencia = 1;  // 1-5
+unsigned long tiempoInicio = 0;
+uint8_t resultado = 0;  // 0: verde, 1: rojo
+unsigned long ultimoTono = 0;
+bool tonoActivo = false;
+
+// Configuración de probabilidades según frecuencia (20%, 40%, 60%, 80%, 90%)
+const uint8_t PROBABILIDAD_ROJO[5] = {20, 40, 60, 80, 90};
+
+// Variables para debounce
+unsigned long ultimoDebounceFrec = 0;
+unsigned long ultimoDebounceStart = 0;
+const unsigned long DEBOUNCE_DELAY = 50;
+bool lastFrecState = HIGH;
+bool lastStartState = HIGH;
+
+void setup() {
+  // Configurar pines
+  pinMode(PIN_BUZZER, OUTPUT);
+  pinMode(PIN_LED_VERDE, OUTPUT);
+  pinMode(PIN_LED_ROJO, OUTPUT);
+  
+  // Pulsadores con pull-up interno
+  pinMode(PIN_START, INPUT_PULLUP);
+  pinMode(PIN_FREC, INPUT_PULLUP);
+  
+  // Inicializar semilla aleatoria con voltaje flotante en pin analógico
+  randomSeed(analogRead(A2));
+  
+  // Leer frecuencia guardada de EEPROM
+  frecuencia = EEPROM.read(0);
+  if (frecuencia < 1 || frecuencia > 5) {
+    frecuencia = 1;
+    EEPROM.update(0, frecuencia);
+  }
+  
+  // Estado inicial
+  digitalWrite(PIN_LED_ROJO, LOW);
+  digitalWrite(PIN_LED_VERDE, LOW);
+  digitalWrite(PIN_BUZZER, LOW);
+  
+  // Indicar frecuencia actual al inicio (feedback visual)
+  indicarFrecuenciaActual();
+}
+
+void loop() {
+  // --- MÁQUINA DE ESTADOS PRINCIPAL ---
+  switch(estado) {
+    case REPOSO:
+      manejarReposo();
+      break;
+      
+    case INTERMITENTE:
+      ejecutarIntermitente();
+      break;
+      
+    case RESULTADO:
+      ejecutarResultado();
+      break;
+  }
+}
+
+void manejarReposo() {
+  unsigned long tiempoActual = millis();
+  
+  // Leer estado del pulsador de frecuencia
+  bool lecturaFrec = digitalRead(PIN_FREC);
+  
+  // Detectar flanco descendente (pulsado) con debounce
+  if (lecturaFrec == LOW && lastFrecState == HIGH && 
+      (tiempoActual - ultimoDebounceFrec) > DEBOUNCE_DELAY) {
+    
+    ultimoDebounceFrec = tiempoActual;
+    
+    // Pequeña espera para estabilizar
+    delay(10);
+    if (digitalRead(PIN_FREC) == LOW) {
+      incrementarFrecuencia();
+      
+      // Esperar a que se suelte el pulsador
+      while(digitalRead(PIN_FREC) == LOW) {
+        delay(10);
+      }
+    }
+  }
+  lastFrecState = lecturaFrec;
+  
+  // Leer estado del pulsador START
+  bool lecturaStart = digitalRead(PIN_START);
+  
+  // Detectar flanco descendente (pulsado) con debounce
+  if (lecturaStart == LOW && lastStartState == HIGH && 
+      (tiempoActual - ultimoDebounceStart) > DEBOUNCE_DELAY) {
+    
+    ultimoDebounceStart = tiempoActual;
+    
+    // Pequeña espera para estabilizar
+    delay(10);
+    if (digitalRead(PIN_START) == LOW) {
+      iniciarSecuencia();
+      
+      // Esperar a que se suelte el pulsador
+      while(digitalRead(PIN_START) == LOW) {
+        delay(10);
+      }
+    }
+  }
+  lastStartState = lecturaStart;
+}
+
+void indicarFrecuenciaActual() {
+  // Apagar LEDs primero
+  digitalWrite(PIN_LED_ROJO, LOW);
+  digitalWrite(PIN_LED_VERDE, LOW);
+  delay(200);
+  
+  // Parpadear el LED rojo según la frecuencia actual
+  for (int i = 0; i < frecuencia; i++) {
+    digitalWrite(PIN_LED_ROJO, HIGH);
+    delay(200);
+    digitalWrite(PIN_LED_ROJO, LOW);
+    if (i < frecuencia - 1) delay(200);
+  }
+}
+
+void leerFrecuencia() {
+  frecuencia = EEPROM.read(0);
+  if (frecuencia < 1 || frecuencia > 5) {
+    frecuencia = 1;
+    EEPROM.update(0, frecuencia);
+  }
+}
+
+void guardarFrecuencia() {
+  EEPROM.update(0, frecuencia);
+}
+
+void incrementarFrecuencia() {
+  frecuencia++;
+  if (frecuencia > 5) frecuencia = 1;
+  guardarFrecuencia();
+  
+  // Feedback visual de la frecuencia seleccionada
+  indicarFrecuenciaActual();
+}
+
+void iniciarSecuencia() {
+  estado = INTERMITENTE;
+  tiempoInicio = millis();
+  tonoActivo = false;
+  
+  // Generar resultado aleatorio respetando la frecuencia configurada
+  uint8_t randomVal = random(100); // Número aleatorio entre 0-99
+  
+  // Determinar resultado basado en probabilidad
+  if (randomVal < PROBABILIDAD_ROJO[frecuencia-1]) {
+    resultado = 1; // Rojo
+  } else {
+    resultado = 0; // Verde
+  }
+  
+  // Asegurar que los LEDs estén apagados al inicio
+  digitalWrite(PIN_LED_ROJO, LOW);
+  digitalWrite(PIN_LED_VERDE, LOW);
+  digitalWrite(PIN_BUZZER, LOW);
+}
+
+void ejecutarIntermitente() {
+  unsigned long tiempoTranscurrido = millis() - tiempoInicio;
+  
+  // Verificar si han pasado los 3 segundos
+  if (tiempoTranscurrido >= 3000) {
+    // Fin de la fase intermitente, pasar a resultado
+    estado = RESULTADO;
+    tiempoInicio = millis();
+    ultimoTono = millis();
+    tonoActivo = false;
+    digitalWrite(PIN_BUZZER, LOW);
+    return;
+  }
+  
+  // Intermitente cada 250ms
+  uint8_t ciclo = (tiempoTranscurrido / 125) % 4; // 0-3
+  
+  if (ciclo == 0 || ciclo == 2) {
+    // Ambos LEDs encendidos
+    digitalWrite(PIN_LED_ROJO, HIGH);
+    digitalWrite(PIN_LED_VERDE, HIGH);
+  } else if (ciclo == 1) {
+    // Solo rojo encendido
+    digitalWrite(PIN_LED_ROJO, HIGH);
+    digitalWrite(PIN_LED_VERDE, LOW);
+  } else { // ciclo == 3
+    // Solo verde encendido
+    digitalWrite(PIN_LED_ROJO, LOW);
+    digitalWrite(PIN_LED_VERDE, HIGH);
+  }
+}
+
+void ejecutarResultado() {
+  unsigned long tiempoTranscurrido = millis() - tiempoInicio;
+  
+  // Verificar si han pasado los 4 segundos
+  if (tiempoTranscurrido >= 4000) {
+    // Fin de la fase de resultado
+    digitalWrite(PIN_LED_ROJO, LOW);
+    digitalWrite(PIN_LED_VERDE, LOW);
+    digitalWrite(PIN_BUZZER, LOW);
+    estado = REPOSO;
+    
+    // Pequeña pausa antes de permitir otro START
+    delay(300);
+    return;
+  }
+  
+  // Mostrar el resultado
+  if (resultado == 1) { // ROJO
+    digitalWrite(PIN_LED_ROJO, HIGH);
+    digitalWrite(PIN_LED_VERDE, LOW);
+    
+    // Controlar buzzer intermitente (250ms ON, 250ms OFF)
+    if (tiempoTranscurrido % 500 < 250) {
+      // Generar tono de 1000Hz usando delayMicroseconds
+      generarTono(PIN_BUZZER, TONO_ROJO, 10); // 10ms de tono
+    } else {
+      digitalWrite(PIN_BUZZER, LOW);
+    }
+    
+  } else { // VERDE
+    digitalWrite(PIN_LED_ROJO, LOW);
+    digitalWrite(PIN_LED_VERDE, HIGH);
+    digitalWrite(PIN_BUZZER, LOW);
+  }
+}
+
+// Función para generar tono sin conflicto con tone() de Arduino
+void generarTono(uint8_t pin, unsigned int frequency, unsigned int duration) {
+  if (frequency == 0) return;
+  
+  unsigned long periodo = 1000000L / frequency; // Periodo en microsegundos
+  unsigned long pulso = periodo / 2;
+  unsigned long tiempoTono = millis();
+  
+  // Generar el tono durante 'duration' milisegundos
+  while ((millis() - tiempoTono) < duration) {
+    digitalWrite(pin, HIGH);
+    delayMicroseconds(pulso);
+    digitalWrite(pin, LOW);
+    delayMicroseconds(pulso);
+  }
+}
